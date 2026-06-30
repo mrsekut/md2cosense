@@ -122,7 +122,7 @@ async function prompt(question: string): Promise<string> {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(Bun.argv.slice(2));
 
   if (args.help || !args.path) {
     process.stdout.write(HELP);
