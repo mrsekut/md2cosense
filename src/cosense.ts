@@ -93,7 +93,7 @@ export async function previewNewPage(
   const out = res.stdout;
   const previewId = parseHeaderValue(out, "previewId");
   if (!previewId) {
-    throw new Error(`previewEdit: previewId が取得できません:\n${out}`);
+    throw new Error(`previewEdit: could not obtain previewId:\n${out}`);
   }
   const title = parseHeaderValue(out, "title") ?? "";
   const status = parseHeaderValue(out, "status");

@@ -70,21 +70,21 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
-const HELP = `md2cosense - ローカルのMarkdownをCosense(Scrapbox)に展開するCLI
+const HELP = `md2cosense - A CLI to publish local Markdown to Cosense (Scrapbox)
 
-使い方:
+Usage:
   md2cosense <path> --project <projectName|projectUrl> [options]
 
-引数:
-  <path>            .md ファイル、または .md を含むディレクトリ
+Arguments:
+  <path>            A .md file, or a directory containing .md files
 
-オプション:
-  -p, --project     展開先のCosenseプロジェクト (名前 or URL) [必須]
-      --dry-run     previewまでで止め、実際には書き込まない
-  -y, --yes         確認プロンプトをスキップして一括展開
-  -h, --help        このヘルプを表示
+Options:
+  -p, --project     Target Cosense project (name or URL) [required]
+      --dry-run     Stop at preview; do not write anything
+  -y, --yes         Skip confirmation prompts and publish all at once
+  -h, --help        Show this help
 
-例:
+Examples:
   md2cosense ./notes --project myproject
   md2cosense ./README.md -p https://scrapbox.io/myproject --dry-run
 `;
@@ -129,7 +129,7 @@ async function main() {
     process.exit(args.help ? 0 : 1);
   }
   if (!args.project) {
-    console.error("エラー: --project が必要です\n");
+    console.error("Error: --project is required\n");
     process.stdout.write(HELP);
     process.exit(1);
   }
@@ -140,22 +140,22 @@ async function main() {
   // ファイル収集
   const files = await collectMarkdownFiles(args.path);
   if (files.length === 0) {
-    console.error(`Markdownファイルが見つかりません: ${args.path}`);
+    console.error(`No Markdown files found: ${args.path}`);
     process.exit(1);
   }
 
-  console.log(`展開先: ${projectUrl}`);
-  console.log(`対象ファイル: ${files.length}件`);
-  console.log(args.dryRun ? "(dry-run: 書き込みません)\n" : "");
+  console.log(`Target: ${projectUrl}`);
+  console.log(`Files: ${files.length}`);
+  console.log(args.dryRun ? "(dry-run: nothing will be written)\n" : "");
 
   // ログイン確認 (書き込み時のみ)
   if (!args.dryRun) {
     const loggedIn = await isLoggedIn(origin);
     if (!loggedIn) {
       console.error(
-        `\n未ログインです。別ターミナルで以下を実行してログインしてください:\n` +
+        `\nNot logged in. Run the following in another terminal to log in:\n` +
           `  cosense login ${origin}\n` +
-          `完了後にもう一度実行してください。（--dry-run はログイン不要です）`,
+          `Then run this command again. (--dry-run does not require login.)`,
       );
       process.exit(1);
     }
@@ -173,7 +173,7 @@ async function main() {
 
     console.log(`\n──────────────────────────────────────────`);
     console.log(`📄 ${rel}`);
-    console.log(`   → ページタイトル: "${title}"`);
+    console.log(`   → page title: "${title}"`);
 
     try {
       const preview = await previewNewPage(projectUrl, fullText);
@@ -183,39 +183,39 @@ async function main() {
         console.log(
           preview.bodyPreview
             ? indent(preview.bodyPreview, "   | ")
-            : "   (本文プレビューなし)",
+            : "   (no body preview)",
         );
         success++;
         continue;
       }
 
       if (!args.yes) {
-        const ans = await prompt(`   展開しますか? [y/N/a(全部yes)/q(中断)] `);
+        const ans = await prompt(`   Publish? [y/N/a(yes to all)/q(quit)] `);
         if (ans === "q") {
-          console.log("中断しました。");
+          console.log("Aborted.");
           break;
         }
         if (ans === "a") {
           args.yes = true;
         } else if (ans !== "y") {
-          console.log("   スキップしました。");
+          console.log("   Skipped.");
           skipped++;
           continue;
         }
       }
 
       const result = await submitEdit(projectUrl, preview.previewId);
-      console.log(`   ✅ 展開しました: ${result.pageUrl}`);
+      console.log(`   ✅ Published: ${result.pageUrl}`);
       success++;
     } catch (err) {
-      console.error(`   ❌ 失敗: ${(err as Error).message}`);
+      console.error(`   ❌ Failed: ${(err as Error).message}`);
       failed++;
     }
   }
 
   console.log(`\n──────────────────────────────────────────`);
   console.log(
-    `完了: 成功 ${success} / スキップ ${skipped} / 失敗 ${failed} (全${files.length}件)`,
+    `Done: ${success} succeeded / ${skipped} skipped / ${failed} failed (of ${files.length})`,
   );
 }
 
