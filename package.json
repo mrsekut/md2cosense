@@ -1,0 +1,23 @@
+{
+  "name": "md2cosense",
+  "version": "0.1.0",
+  "description": "ローカルのMarkdownをCosense(Scrapbox)プロジェクトに展開するCLI",
+  "type": "module",
+  "bin": {
+    "md2cosense": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
