@@ -153,9 +153,11 @@ async function main() {
     const loggedIn = await isLoggedIn(origin);
     if (!loggedIn) {
       console.error(
-        `\nNot logged in. Run the following in another terminal to log in:\n` +
+        `\nNot authenticated for ${origin}.\n` +
+          `Log in with cosense-cli so the token is saved to ~/.cosense/settings.json:\n` +
           `  cosense login ${origin}\n` +
-          `Then run this command again. (--dry-run does not require login.)`,
+          `(Alternatively, set the COSENSE_PAT environment variable.)\n` +
+          `Then run this command again.`,
       );
       process.exit(1);
     }
