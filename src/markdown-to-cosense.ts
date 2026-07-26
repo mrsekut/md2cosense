@@ -35,13 +35,15 @@ function convertInline(line: string): string {
     return `[${url} ${text}]`;
   });
 
-  // 太字 **text** / __text__ -> [* text]
-  s = s.replace(/\*\*([^*]+)\*\*/g, "[* $1]");
-  s = s.replace(/__([^_]+)__/g, "[* $1]");
+  // 太字 **text** / __text__ -> 通常のtext
+  // Cosenseでは太字を多用する文化がないため、記法を落として素のテキストにする。
+  // (見出しの [* ] 等は headingToCosense 側で別途扱う)
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  s = s.replace(/__([^_]+)__/g, "$1");
 
-  // 斜体 *text* / _text_ -> [/ text]
-  s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![*\w])/g, "[/ $1]");
-  s = s.replace(/(?<![_\w])_([^_\n]+)_(?![_\w])/g, "[/ $1]");
+  // 斜体 *text* / _text_ -> 通常のtext (太字と同じ理由)
+  s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![*\w])/g, "$1");
+  s = s.replace(/(?<![_\w])_([^_\n]+)_(?![_\w])/g, "$1");
 
   // 取り消し線 ~~text~~ -> [- text]
   s = s.replace(/~~([^~]+)~~/g, "[- $1]");

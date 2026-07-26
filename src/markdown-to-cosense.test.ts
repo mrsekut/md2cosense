@@ -59,7 +59,13 @@ describe("見出し", () => {
   });
 
   it("見出し内のインライン記法も変換する", () => {
-    expect(body("## **bold** heading")).toBe("[** [* bold] heading]");
+    expect(body("## ~~old~~ heading")).toBe("[** [- old] heading]");
+  });
+
+  it("見出しの太字・斜体は落とすが、見出し自体の強調は維持する", () => {
+    expect(body("## **bold** and *italic* heading")).toBe(
+      "[** bold and italic heading]",
+    );
   });
 
   it("#が7個以上の行は見出しとして扱わない", () => {
@@ -100,20 +106,20 @@ describe("インライン記法", () => {
     );
   });
 
-  it("太字 **text** を [* text] に変換する", () => {
-    expect(body("これは **太字** です")).toBe("これは [* 太字] です");
+  it("太字 **text** は記法を落として通常のテキストにする", () => {
+    expect(body("これは **太字** です")).toBe("これは 太字 です");
   });
 
-  it("太字 __text__ を [* text] に変換する", () => {
-    expect(body("これは __太字__ です")).toBe("これは [* 太字] です");
+  it("太字 __text__ は記法を落として通常のテキストにする", () => {
+    expect(body("これは __太字__ です")).toBe("これは 太字 です");
   });
 
-  it("斜体 *text* を [/ text] に変換する", () => {
-    expect(body("これは *斜体* です")).toBe("これは [/ 斜体] です");
+  it("斜体 *text* は記法を落として通常のテキストにする", () => {
+    expect(body("これは *斜体* です")).toBe("これは 斜体 です");
   });
 
-  it("斜体 _text_ を [/ text] に変換する", () => {
-    expect(body("これは _斜体_ です")).toBe("これは [/ 斜体] です");
+  it("斜体 _text_ は記法を落として通常のテキストにする", () => {
+    expect(body("これは _斜体_ です")).toBe("これは 斜体 です");
   });
 
   it("snake_case の下線を斜体と誤認しない", () => {
@@ -121,7 +127,11 @@ describe("インライン記法", () => {
   });
 
   it("太字を斜体として二重変換しない", () => {
-    expect(body("**bold**")).toBe("[* bold]");
+    expect(body("**bold**")).toBe("bold");
+  });
+
+  it("太字斜体 ***text*** も通常のテキストにする", () => {
+    expect(body("***both***")).toBe("both");
   });
 
   it("取り消し線 ~~text~~ を [- text] に変換する", () => {
@@ -155,15 +165,15 @@ describe("リスト", () => {
   });
 
   it("リスト項目内のインライン記法も変換する", () => {
-    expect(body("- [Example](https://example.com) と **太字**")).toBe(
-      " [https://example.com Example] と [* 太字]",
+    expect(body("- [Example](https://example.com) と ~~取り消し~~")).toBe(
+      " [https://example.com Example] と [- 取り消し]",
     );
   });
 });
 
 describe("引用", () => {
   it("> をそのまま維持しつつインライン変換する", () => {
-    expect(body("> **強調** された引用")).toBe("> [* 強調] された引用");
+    expect(body("> ~~削除~~ された引用")).toBe("> [- 削除] された引用");
   });
 
   it(">の直後に空白が無くても正規化する", () => {
@@ -273,7 +283,7 @@ describe("複合ケース", () => {
     expect(r.title).toBe("My Page");
     expect(r.body).toBe(
       [
-        "これは [* 導入] です。詳細は [https://example.com/docs docs] を参照。",
+        "これは 導入 です。詳細は [https://example.com/docs docs] を参照。",
         "",
         "[** セクション]",
         "",
