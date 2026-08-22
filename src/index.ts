@@ -121,6 +121,98 @@ async function prompt(question: string): Promise<string> {
   return "";
 }
 
+const SEPARATOR = "──────────────────────────────────────────";
+
+/** 各ページを書き込むかどうかの決め方 */
+type PublishMode = "dry-run" | "interactive" | "yes-to-all";
+
+/** 1ページ分の処理結果。aborted はユーザーが中断したことを表す */
+type Outcome = "succeeded" | "skipped" | "failed" | "aborted";
+
+/** 確認プロンプトへの回答 */
+type Decision = "yes" | "yes-to-all" | "no" | "quit";
+
+function parseDecision(input: string): Decision {
+  switch (input) {
+    case "y":
+      return "yes";
+    case "a":
+      return "yes-to-all";
+    case "q":
+      return "quit";
+    default:
+      return "no";
+  }
+}
+
+async function decide(mode: PublishMode): Promise<Decision> {
+  if (mode === "yes-to-all") return "yes";
+  return parseDecision(await prompt(`   Publish? [y/N/a(yes to all)/q(quit)] `));
+}
+
+/**
+ * 1ファイルを変換して書き込む。
+ * "a" が選ばれるとそれ以降は確認を挟まないので、次に使う mode も一緒に返す。
+ */
+async function publishOne(
+  file: string,
+  projectUrl: string,
+  mode: PublishMode,
+): Promise<{ outcome: Outcome; mode: PublishMode }> {
+  const md = await readFile(file, "utf8");
+  const page = markdownToCosense(md, basename(file, extname(file)));
+
+  console.log(`\n${SEPARATOR}`);
+  console.log(`📄 ${relative(process.cwd(), file)}`);
+  console.log(`   → page title: "${page.title}"`);
+
+  try {
+    const preview = await previewNewPage(projectUrl, toFullText(page));
+
+    if (mode === "dry-run") {
+      console.log(`   [dry-run] ${preview.pageUrl}`);
+      console.log(
+        preview.bodyPreview
+          ? indent(preview.bodyPreview, "   | ")
+          : "   (no body preview)",
+      );
+      return { outcome: "succeeded", mode };
+    }
+
+    const decision = await decide(mode);
+    if (decision === "quit") {
+      console.log("Aborted.");
+      return { outcome: "aborted", mode };
+    }
+    if (decision === "no") {
+      console.log("   Skipped.");
+      return { outcome: "skipped", mode };
+    }
+
+    const next = decision === "yes-to-all" ? "yes-to-all" : mode;
+    const result = await submitEdit(projectUrl, preview.previewId);
+    console.log(`   ✅ Published: ${result.pageUrl}`);
+    return { outcome: "succeeded", mode: next };
+  } catch (err) {
+    console.error(`   ❌ Failed: ${(err as Error).message}`);
+    return { outcome: "failed", mode };
+  }
+}
+
+/** 中断されるまで順に処理し、各ファイルの結果を集める */
+async function publishAll(
+  files: string[],
+  projectUrl: string,
+  mode: PublishMode,
+): Promise<Outcome[]> {
+  const [head, ...tail] = files;
+  if (head === undefined) return [];
+
+  const { outcome, mode: next } = await publishOne(head, projectUrl, mode);
+  if (outcome === "aborted") return [outcome];
+  return [outcome, ...(await publishAll(tail, projectUrl, next))];
+}
+
 async function main() {
   const args = parseArgs(Bun.argv.slice(2));
 
@@ -163,61 +255,19 @@ async function main() {
     }
   }
 
-  let success = 0;
-  let skipped = 0;
-  let failed = 0;
+  const mode: PublishMode = args.dryRun
+    ? "dry-run"
+    : args.yes
+      ? "yes-to-all"
+      : "interactive";
 
-  for (const file of files) {
-    const md = await readFile(file, "utf8");
-    const fallbackTitle = basename(file, extname(file));
-    const page = markdownToCosense(md, fallbackTitle);
-    const rel = relative(process.cwd(), file);
+  const outcomes = await publishAll(files, projectUrl, mode);
+  const count = (target: Outcome) => outcomes.filter((o) => o === target).length;
 
-    console.log(`\n──────────────────────────────────────────`);
-    console.log(`📄 ${rel}`);
-    console.log(`   → page title: "${page.title}"`);
-
-    try {
-      const preview = await previewNewPage(projectUrl, toFullText(page));
-
-      if (args.dryRun) {
-        console.log(`   [dry-run] ${preview.pageUrl}`);
-        console.log(
-          preview.bodyPreview
-            ? indent(preview.bodyPreview, "   | ")
-            : "   (no body preview)",
-        );
-        success++;
-        continue;
-      }
-
-      if (!args.yes) {
-        const ans = await prompt(`   Publish? [y/N/a(yes to all)/q(quit)] `);
-        if (ans === "q") {
-          console.log("Aborted.");
-          break;
-        }
-        if (ans === "a") {
-          args.yes = true;
-        } else if (ans !== "y") {
-          console.log("   Skipped.");
-          skipped++;
-          continue;
-        }
-      }
-
-      const result = await submitEdit(projectUrl, preview.previewId);
-      console.log(`   ✅ Published: ${result.pageUrl}`);
-      success++;
-    } catch (err) {
-      console.error(`   ❌ Failed: ${(err as Error).message}`);
-      failed++;
-    }
-  }
-
-  console.log(`\n──────────────────────────────────────────`);
+  console.log(`\n${SEPARATOR}`);
   console.log(
-    `Done: ${success} succeeded / ${skipped} skipped / ${failed} failed (of ${files.length})`,
+    `Done: ${count("succeeded")} succeeded / ${count("skipped")} skipped / ` +
+      `${count("failed")} failed (of ${files.length})`,
   );
 }
 
