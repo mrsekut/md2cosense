@@ -39,33 +39,37 @@ function normalizeOrigin(origin: string): string {
   }
 }
 
-/** ~/.cosense/settings.json から指定 origin の PAT を取り出す (cosense login で保存される) */
-function readPatFromSettings(origin: string): string | undefined {
-  const path = join(homedir(), ".cosense", "settings.json");
-  let parsed: unknown;
+/** JSONファイルを読む。存在しない・壊れている場合は undefined */
+function readJsonFile(path: string): unknown {
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return undefined;
   }
-  if (!parsed || typeof parsed !== "object") return undefined;
-  const users = (parsed as { users?: unknown }).users;
+}
+
+/** ~/.cosense/settings.json の users[] の1件 */
+type StoredUser = { url: string; token: string };
+
+function isStoredUser(value: unknown): value is StoredUser {
+  if (!value || typeof value !== "object") return false;
+  const { url, token } = value as Partial<StoredUser>;
+  return typeof url === "string" && typeof token === "string";
+}
+
+/** ~/.cosense/settings.json から指定 origin の PAT を取り出す (cosense login で保存される) */
+function readPatFromSettings(origin: string): string | undefined {
+  const settings = readJsonFile(join(homedir(), ".cosense", "settings.json"));
+  const users = (settings as { users?: unknown } | undefined)?.users;
   if (!Array.isArray(users)) return undefined;
 
   const target = normalizeOrigin(origin);
-  for (const entry of users) {
-    if (!entry || typeof entry !== "object") continue;
-    const u = entry as { url?: unknown; token?: unknown };
-    if (
-      typeof u.url === "string" &&
-      typeof u.token === "string" &&
-      normalizeOrigin(u.url) === target
-    ) {
-      const token = u.token.trim();
-      if (token !== "") return token;
-    }
-  }
-  return undefined;
+  const token = users
+    .filter(isStoredUser)
+    .find((user) => normalizeOrigin(user.url) === target)
+    ?.token.trim();
+
+  return token || undefined;
 }
 
 /**
@@ -78,15 +82,20 @@ function readPat(origin: string): string | undefined {
   return readPatFromSettings(origin);
 }
 
+/** 認証エラーのときだけ、設定方法を案内する一文を添える */
+function authHint(status: number): string {
+  if (status !== 401 && status !== 403) return "";
+  return `\n\nRun \`cosense login\` to store a valid Personal Access Token for this origin (or set COSENSE_PAT).`;
+}
+
 /** HTTPエラー。401/403 のときは認証設定を案内する */
 class HttpError extends Error {
   readonly status: number;
   constructor(status: number, statusText: string, url: string, body: string) {
-    let message = `HTTP ${status} ${statusText}\n${url}\n${body.slice(0, 500)}`;
-    if (status === 401 || status === 403) {
-      message += `\n\nRun \`cosense login\` to store a valid Personal Access Token for this origin (or set COSENSE_PAT).`;
-    }
-    super(message);
+    super(
+      `HTTP ${status} ${statusText}\n${url}\n${body.slice(0, 500)}` +
+        authHint(status),
+    );
     this.name = "HttpError";
     this.status = status;
   }
