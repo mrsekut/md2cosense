@@ -106,6 +106,58 @@ function convertQuotes(line: string): string {
   return m ? `> ${m[2]!}` : line;
 }
 
+
+const TABLE_ROW = /^(\s*)\|(.+)\|\s*$/;
+
+/** `| a | b |` の1行をセルに分解する */
+function splitCells(line: string): string[] {
+  const m = line.match(TABLE_ROW);
+  if (!m) return [];
+  return m[2]!.split("|").map((cell) => cell.trim());
+}
+
+function isTableRow(line: string): boolean {
+  return TABLE_ROW.test(line);
+}
+
+/** ヘッダ直下の `|---|:--:|` 行。Cosenseに相当する概念がないので落とす */
+function isDelimiterRow(line: string): boolean {
+  const cells = splitCells(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
+}
+
+/**
+ * Cosenseの表は `table:<name>` で始め、以降の行を1段インデントしてタブ区切りで並べる。
+ * <name> は一意である必要がない単なるラベルなので、固定で `table` を使う。
+ */
+function renderTable(rows: string[], indent: string): string[] {
+  return [
+    `${indent}table:table`,
+    ...rows.map((row) => `${indent} ${splitCells(row).join("\t")}`),
+  ];
+}
+
+/** 連続する `|...|` 行をCosenseの表へ変換する */
+const convertTables: Transform = (lines) => {
+  const start = lines.findIndex(isTableRow);
+  if (start === -1) return lines;
+
+  const offset = lines.slice(start).findIndex((line) => !isTableRow(line));
+  const end = offset === -1 ? lines.length : start + offset;
+
+  const block = lines.slice(start, end);
+  const indent = " ".repeat(
+    Math.floor(block[0]!.match(TABLE_ROW)![1]!.replace(/\t/g, "  ").length / 2),
+  );
+  const rows = block.filter((line) => !isDelimiterRow(line));
+
+  return [
+    ...lines.slice(0, start),
+    ...renderTable(rows, indent),
+    ...convertTables(lines.slice(end)),
+  ];
+};
+
 /**
  * 適用順には依存関係がある:
  * - 水平線が最初。`***` や `___` を強調記法・リストマーカーとして拾わせないため。
@@ -113,6 +165,7 @@ function convertQuotes(line: string): string {
  *   先に包んでしまうと包んだ記号と本文中の記号がペアと誤認される。
  *   例: `## **bold**` を先に包むと `[** **bold**]` となり、太字除去が `**` を跨いで壊れる。
  * - 見出しはリストより先。`- ` を含む見出しをリスト扱いさせないため。
+ * - 表は行をまたいで集約するので、行数が変わる他の変換より後にまとめて置く。
  */
 const PIPELINE: Transform[] = [
   removeHorizontalRules,
@@ -123,6 +176,7 @@ const PIPELINE: Transform[] = [
   perLine(convertHeadings),
   perLine(convertLists),
   perLine(convertQuotes),
+  convertTables,
 ];
 
 function applyPipeline(lines: string[]): string[] {

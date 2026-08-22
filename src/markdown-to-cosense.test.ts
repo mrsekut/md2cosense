@@ -212,6 +212,66 @@ describe("コードブロック", () => {
   });
 });
 
+describe("表", () => {
+  it("パイプ表を table:table + タブ区切りに変換する", () => {
+    const md = ["| a | b |", "| --- | --- |", "| 1 | 2 |"].join("\n");
+    expect(body(md)).toBe(["table:table", " a\tb", " 1\t2"].join("\n"));
+  });
+
+  it("alignment指定の区切り行も落とす", () => {
+    const md = ["| a | b | c |", "|:--|:-:|--:|", "| 1 | 2 | 3 |"].join("\n");
+    expect(body(md)).toBe(["table:table", " a\tb\tc", " 1\t2\t3"].join("\n"));
+  });
+
+  it("セル前後の空白を除去する", () => {
+    expect(body("|a|b|")).toBe(["table:table", " a\tb"].join("\n"));
+    expect(body("|   a   |   b   |")).toBe(["table:table", " a\tb"].join("\n"));
+  });
+
+  it("区切り行が無くても表として扱う", () => {
+    expect(body(["| a | b |", "| 1 | 2 |"].join("\n"))).toBe(
+      ["table:table", " a\tb", " 1\t2"].join("\n"),
+    );
+  });
+
+  it("表が本文の途中で終わっても後続行はそのまま残す", () => {
+    const md = ["before", "| a |", "| 1 |", "after"].join("\n");
+    expect(body(md)).toBe(
+      ["before", "table:table", " a", " 1", "after"].join("\n"),
+    );
+  });
+
+  it("表が複数あってもそれぞれ変換する", () => {
+    const md = ["| a |", "", "| b |"].join("\n");
+    expect(body(md)).toBe(
+      ["table:table", " a", "", "table:table", " b"].join("\n"),
+    );
+  });
+
+  it("セル内のインライン記法も変換する", () => {
+    const md = ["| [x](http://x.com) | **b** |"].join("\n");
+    expect(body(md)).toBe(["table:table", " [http://x.com x]\tb"].join("\n"));
+  });
+
+  it("インデントされた表は階層を維持する", () => {
+    const md = ["- item", "  | a | b |"].join("\n");
+    expect(body(md)).toBe([" item", " table:table", "  a\tb"].join("\n"));
+  });
+
+  it("コードブロック内の表は変換しない", () => {
+    const md = ["```md", "| a | b |", "```"].join("\n");
+    expect(body(md)).toBe(["code:md", " | a | b |"].join("\n"));
+  });
+
+  it("パイプを含まない行は表として扱わない", () => {
+    expect(body("a | b")).toBe("a | b");
+  });
+
+  it("水平線とセル区切りを取り違えない", () => {
+    expect(body("---")).toBe("");
+  });
+});
+
 describe("水平線", () => {
   it("---, ***, ___ の行を丸ごと削除する", () => {
     expect(body("before\n---\n***\n___\nafter")).toBe("before\nafter");
