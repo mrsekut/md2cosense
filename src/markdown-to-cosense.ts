@@ -3,6 +3,10 @@
  *
  * プロトタイプ用の簡易変換。完全なMarkdown仕様は網羅しない。
  * よく使う記法だけをCosenseのUI記法にマッピングする。
+ *
+ * 設計: 「1つの記法につき1つの変換関数」に分割し、PIPELINE の順に適用する。
+ * コードブロックの中身はどの変換にも触らせたくないので、先に fence で
+ * テキスト領域とコード領域へ切り分け、テキスト領域にだけ PIPELINE を通す。
  */
 
 export type ConvertResult = {
@@ -14,129 +18,205 @@ export type ConvertResult = {
   fullText: string;
 };
 
-/**
- * 見出しレベル(1-6)をCosenseの強調記法へ。
- * Cosenseは [* ] が一番大きく、アスタリスクが多いほど大きい。
- * Markdownは # が少ないほど大きいので逆向きにマップする。
- */
-function headingToCosense(level: number, text: string): string {
-  // h1->***(3), h2->**(2), h3 以降 ->*(1)
-  const stars = level === 1 ? 3 : level === 2 ? 2 : 1;
-  return `[${"*".repeat(stars)} ${text}]`;
+/** 行の配列を受け取り行の配列を返す変換。行数が変わってもよい (水平線の削除など) */
+type Transform = (lines: string[]) => string[];
+
+/** 行単位で閉じる変換を Transform に持ち上げる */
+function perLine(convert: (line: string) => string): Transform {
+  return (lines) => lines.map(convert);
 }
 
-/** インライン記法の変換 (1行に対して適用) */
-function convertInline(line: string): string {
-  let s = line;
+// ---------------------------------------------------------------------------
+// インライン記法
+// ---------------------------------------------------------------------------
 
-  // リンク [text](url) -> [url text]  (画像も同様に扱う)
-  s = s.replace(/!?\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_m, text, url) => {
-    if (!text) return `[${url}]`;
-    return `[${url} ${text}]`;
-  });
+/** リンク [text](url) と画像 ![alt](url) を [url text] に変換する */
+function convertLinks(line: string): string {
+  return line.replace(
+    /!?\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+    (_m, text: string, url: string) => (text ? `[${url} ${text}]` : `[${url}]`),
+  );
+}
 
-  // 太字 **text** / __text__ -> 通常のtext
-  // Cosenseでは太字を多用する文化がないため、記法を落として素のテキストにする。
-  // (見出しの [* ] 等は headingToCosense 側で別途扱う)
-  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
-  s = s.replace(/__([^_]+)__/g, "$1");
+/**
+ * 太字 **text** / __text__ を素のテキストにする。
+ * Cosenseでは太字を多用する文化がないため、記法を落とす。
+ */
+function removeStrong(line: string): string {
+  return line.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/__([^_]+)__/g, "$1");
+}
 
-  // 斜体 *text* / _text_ -> 通常のtext (太字と同じ理由)
-  s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![*\w])/g, "$1");
-  s = s.replace(/(?<![_\w])_([^_\n]+)_(?![_\w])/g, "$1");
+/** 斜体 *text* / _text_ を素のテキストにする (太字と同じ理由) */
+function removeEmphasis(line: string): string {
+  return line
+    .replace(/(?<![*\w])\*([^*\n]+)\*(?![*\w])/g, "$1")
+    .replace(/(?<![_\w])_([^_\n]+)_(?![_\w])/g, "$1");
+}
 
-  // 取り消し線 ~~text~~ -> [- text]
-  s = s.replace(/~~([^~]+)~~/g, "[- $1]");
+/** 取り消し線 ~~text~~ を [- text] に変換する */
+function convertStrike(line: string): string {
+  return line.replace(/~~([^~]+)~~/g, "[- $1]");
+}
 
-  // インラインコード `code` はCosenseでも `code` なのでそのまま
+// インラインコード `code` はCosenseでも `code` なので変換関数を持たない。
 
-  return s;
+// ---------------------------------------------------------------------------
+// ブロック記法
+// ---------------------------------------------------------------------------
+
+const HEADING = /^(#{1,6})\s+(.*)$/;
+
+/**
+ * 見出しをCosenseの強調記法へ。
+ * Cosenseは [* ] が一番小さく、アスタリスクが多いほど大きい。
+ * Markdownは # が少ないほど大きいので逆向きにマップする (h1->***, h2->**, h3以降->*)。
+ */
+function convertHeadings(line: string): string {
+  const m = line.match(HEADING);
+  if (!m) return line;
+  const level = m[1]!.length;
+  const stars = level === 1 ? 3 : level === 2 ? 2 : 1;
+  return `[${"*".repeat(stars)} ${m[2]!.trim()}]`;
+}
+
+/** 水平線 --- *** ___ を落とす (Cosenseに相当記法がない) */
+const removeHorizontalRules: Transform = (lines) =>
+  lines.filter((line) => !/^\s*([-*_])\1{2,}\s*$/.test(line));
+
+/**
+ * リストのマーカーを外し、インデントを詰め直す。
+ * Cosenseは行頭スペース1個が1階層なので、Markdownの2スペース(またはタブ)を1階層に換算する。
+ */
+function convertLists(line: string): string {
+  const m = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+  if (!m) return line;
+  const depth = Math.floor(m[1]!.replace(/\t/g, "  ").length / 2);
+  return `${" ".repeat(depth + 1)}${m[3]!}`;
+}
+
+/** 引用。Cosenseも > なので維持しつつ `> ` に正規化する */
+function convertQuotes(line: string): string {
+  const m = line.match(/^(\s*>\s?)(.*)$/);
+  return m ? `> ${m[2]!}` : line;
+}
+
+/**
+ * 適用順には依存関係がある:
+ * - 水平線が最初。`***` や `___` を強調記法・リストマーカーとして拾わせないため。
+ * - インライン系がブロック系より先。ブロック系は行を記法で「包む」ので、
+ *   先に包んでしまうと包んだ記号と本文中の記号がペアと誤認される。
+ *   例: `## **bold**` を先に包むと `[** **bold**]` となり、太字除去が `**` を跨いで壊れる。
+ * - 見出しはリストより先。`- ` を含む見出しをリスト扱いさせないため。
+ */
+const PIPELINE: Transform[] = [
+  removeHorizontalRules,
+  perLine(convertLinks),
+  perLine(removeStrong),
+  perLine(removeEmphasis),
+  perLine(convertStrike),
+  perLine(convertHeadings),
+  perLine(convertLists),
+  perLine(convertQuotes),
+];
+
+function applyPipeline(lines: string[]): string[] {
+  return PIPELINE.reduce((acc, transform) => transform(acc), lines);
+}
+
+// ---------------------------------------------------------------------------
+// コードブロックの保護
+// ---------------------------------------------------------------------------
+
+const FENCE = /^\s*```(.*)$/;
+
+type Segment =
+  | { kind: "text"; lines: string[] }
+  | { kind: "code"; lang: string; lines: string[] };
+
+/**
+ * fence を境にテキスト領域とコード領域へ切り分ける。
+ * これにより、コードブロックの中身をどの変換にも通さずに済む。
+ * 閉じられていないfenceは、以降すべてをコードとして扱う。
+ */
+function splitByFence(lines: string[]): Segment[] {
+  const open = lines.findIndex((line) => FENCE.test(line));
+  if (open === -1) return lines.length ? [{ kind: "text", lines }] : [];
+
+  const head = lines.slice(0, open);
+  const lang = lines[open]!.match(FENCE)![1]!.trim();
+  const rest = lines.slice(open + 1);
+  const close = rest.findIndex((line) => FENCE.test(line));
+  const inside = close === -1 ? rest : rest.slice(0, close);
+  const tail = close === -1 ? [] : rest.slice(close + 1);
+
+  return [
+    ...(head.length ? ([{ kind: "text", lines: head }] as Segment[]) : []),
+    { kind: "code", lang, lines: inside },
+    ...splitByFence(tail),
+  ];
+}
+
+/** Cosenseのコードブロックは `code:<name>` で始め、以降の行を1段インデントする */
+function renderCode(lang: string, lines: string[]): string[] {
+  return [`code:${lang || "code"}`, ...lines.map((line) => ` ${line}`)];
+}
+
+// ---------------------------------------------------------------------------
+// タイトル
+// ---------------------------------------------------------------------------
+
+const H1 = /^#\s+(.*)$/;
+
+/**
+ * 最初のh1をページタイトルへ昇格させ、本文からは取り除く。
+ * コードブロック内の `# ...` を拾わないよう、切り分け済みのセグメントに対して探す。
+ */
+function extractTitle(segments: Segment[]): {
+  title: string | null;
+  rest: Segment[];
+} {
+  const at = segments.findIndex(
+    (s) => s.kind === "text" && s.lines.some((line) => H1.test(line)),
+  );
+  if (at === -1) return { title: null, rest: segments };
+
+  const target = segments[at] as { kind: "text"; lines: string[] };
+  const lineAt = target.lines.findIndex((line) => H1.test(line));
+  const title = target.lines[lineAt]!.match(H1)![1]!.trim();
+
+  return {
+    title,
+    rest: segments.with(at, {
+      kind: "text",
+      lines: target.lines.toSpliced(lineAt, 1),
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+
+/** 先頭・末尾の空行を落とす (本文中の空行は維持する) */
+function trimBlankEdges(lines: string[]): string[] {
+  const start = lines.findIndex((line) => line.trim() !== "");
+  if (start === -1) return [];
+  return lines.slice(start, lines.findLastIndex((line) => line.trim() !== "") + 1);
 }
 
 export function markdownToCosense(
   markdown: string,
   fallbackTitle: string,
 ): ConvertResult {
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const segments = splitByFence(markdown.replace(/\r\n?/g, "\n").split("\n"));
+  const { title, rest } = extractTitle(segments);
 
-  let title: string | null = null;
-  const out: string[] = [];
-
-  let inFence = false;
-  let fenceLang = "";
-
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i]!;
-
-    // コードフェンス ``` の開始/終了
-    const fenceMatch = raw.match(/^\s*```(.*)$/);
-    if (fenceMatch) {
-      if (!inFence) {
-        inFence = true;
-        fenceLang = fenceMatch[1]!.trim();
-        // Cosenseのコードブロックは `code:filename.ext` で開始し、以降はインデント
-        out.push(`code:${fenceLang || "code"}`);
-      } else {
-        inFence = false;
-        fenceLang = "";
-      }
-      continue;
-    }
-
-    if (inFence) {
-      // コードブロック内はそのまま、1段インデント
-      out.push(` ${raw}`);
-      continue;
-    }
-
-    // 見出し
-    const heading = raw.match(/^(#{1,6})\s+(.*)$/);
-    if (heading) {
-      const level = heading[1]!.length;
-      const text = convertInline(heading[2]!.trim());
-      // 最初のh1はページタイトルに昇格させる
-      if (level === 1 && title === null) {
-        title = heading[2]!.trim();
-        continue;
-      }
-      out.push(headingToCosense(level, text));
-      continue;
-    }
-
-    // 水平線 --- *** ___ は無視 (Cosenseに相当記法なし)
-    if (/^\s*([-*_])\1{2,}\s*$/.test(raw)) {
-      continue;
-    }
-
-    // リスト (- * + / 番号)。インデント階層を維持しつつマーカーを除去
-    const listMatch = raw.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
-    if (listMatch) {
-      const indentStr = listMatch[1]!;
-      // 2スペース or タブを1階層とみなす
-      const depth = Math.floor(indentStr.replace(/\t/g, "  ").length / 2);
-      const content = convertInline(listMatch[3]!);
-      out.push(`${" ".repeat(depth + 1)}${content}`);
-      continue;
-    }
-
-    // 引用 > はCosenseも > なので維持しつつインライン変換
-    const quote = raw.match(/^(\s*>\s?)(.*)$/);
-    if (quote) {
-      out.push(`> ${convertInline(quote[2]!)}`);
-      continue;
-    }
-
-    // 通常行
-    out.push(convertInline(raw));
-  }
+  const converted = rest.flatMap((segment) =>
+    segment.kind === "code"
+      ? renderCode(segment.lang, segment.lines)
+      : applyPipeline(segment.lines),
+  );
 
   const finalTitle = (title ?? fallbackTitle).trim() || fallbackTitle;
-
-  // 先頭・末尾の空行を整理
-  while (out.length && out[0]!.trim() === "") out.shift();
-  while (out.length && out[out.length - 1]!.trim() === "") out.pop();
-
-  const body = out.join("\n");
+  const body = trimBlankEdges(converted).join("\n");
   const fullText = body ? `${finalTitle}\n${body}` : finalTitle;
 
   return { title: finalTitle, body, fullText };
