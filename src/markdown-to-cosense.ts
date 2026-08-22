@@ -32,6 +32,24 @@ function perLine(convert: (line: string) => string): Transform {
   return (lines) => lines.map(convert);
 }
 
+/** インラインコード `...` と、変換済みの数式 [$ ...] */
+const PROTECTED = /(`[^`]*`|\[\$[^\]]*\])/;
+
+/**
+ * 保護区間の外側にだけ変換を適用する Transform を作る。
+ * `` `$HOME` `` の $ を数式にしたり、`` `**a**` `` の ** を落としたりしないため。
+ * split はキャプチャ付き正規表現の区切りも結果に残すので、奇数番目が保護区間になる。
+ */
+function perLineOutsideProtected(convert: (text: string) => string): Transform {
+  return (lines) =>
+    lines.map((line) =>
+      line
+        .split(PROTECTED)
+        .map((part, i) => (i % 2 === 1 ? part : convert(part)))
+        .join(""),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // インライン記法
 // ---------------------------------------------------------------------------
@@ -107,6 +125,63 @@ function convertQuotes(line: string): string {
 }
 
 
+// ---------------------------------------------------------------------------
+// 数式 (TeX)
+// ---------------------------------------------------------------------------
+
+/**
+ * インライン数式 \(...\) と $...$ を [$ ...] に変換する。
+ *
+ * $...$ は通貨表記 ($100 と $200 など) を誤って数式にしないよう、
+ * MathJax等と同じ条件を課す: 開き $ の直後と閉じ $ の直前が非空白で、
+ * 閉じ $ の直後が数字でないこと。
+ */
+function convertInlineTex(text: string): string {
+  return text
+    .replace(/\\\((.+?)\\\)/g, (_m, formula: string) => `[$ ${formula.trim()}]`)
+    .replace(
+      /\$(?![\s$])((?:[^$\n\\]|\\.)+?)(?<!\s)\$(?!\d)/g,
+      (_m, formula: string) => `[$ ${formula.trim()}]`,
+    );
+}
+
+const BLOCK_TEX_OPEN = /^(\s*)(?:\$\$|\\\[)(.*)$/;
+const BLOCK_TEX_CLOSE = /^(.*?)(?:\$\$|\\\])\s*$/;
+
+/**
+ * ブロック数式 $$...$$ と \[...\] を1行の [$ ...] にまとめる。
+ *
+ * Cosenseは行ごとに記法を解釈するため、開始と終了を別々の行に置くやり方では
+ * 数式として認識されない。複数行の数式は空白で連結して1行にする。
+ * 閉じられていない場合は数式とみなさず、そのまま残す。
+ */
+const convertBlockTex: Transform = (lines) => {
+  const start = lines.findIndex((line) => BLOCK_TEX_OPEN.test(line));
+  if (start === -1) return lines;
+
+  const [, indent = "", head = ""] = lines[start]!.match(BLOCK_TEX_OPEN)!;
+  const render = (parts: string[], tail: string[]) => [
+    ...lines.slice(0, start),
+    `${indent}[$ ${parts.map((p) => p.trim()).filter(Boolean).join(" ")}]`,
+    ...convertBlockTex(tail),
+  ];
+
+  // 開始行の中で閉じている場合 ($$ x $$ のような書き方)
+  const sameLine = head.match(BLOCK_TEX_CLOSE);
+  if (sameLine) return render([sameLine[1]!], lines.slice(start + 1));
+
+  const rest = lines.slice(start + 1);
+  const close = rest.findIndex((line) => BLOCK_TEX_CLOSE.test(line));
+  if (close === -1) return lines;
+
+  const last = rest[close]!.match(BLOCK_TEX_CLOSE)![1]!;
+  return render(
+    [head, ...rest.slice(0, close), last],
+    rest.slice(close + 1),
+  );
+};
+
+
 const TABLE_ROW = /^(\s*)\|(.+)\|\s*$/;
 
 /** `| a | b |` の1行をセルに分解する */
@@ -160,7 +235,9 @@ const convertTables: Transform = (lines) => {
 
 /**
  * 適用順には依存関係がある:
- * - 水平線が最初。`***` や `___` を強調記法・リストマーカーとして拾わせないため。
+ * - 数式が最初。数式の中身をMarkdownの変換に晒さないため。変換後の [$ ...] は
+ *   PROTECTED として以降の変換から守られる。
+ * - 水平線はその次。`***` や `___` を強調記法・リストマーカーとして拾わせないため。
  * - インライン系がブロック系より先。ブロック系は行を記法で「包む」ので、
  *   先に包んでしまうと包んだ記号と本文中の記号がペアと誤認される。
  *   例: `## **bold**` を先に包むと `[** **bold**]` となり、太字除去が `**` を跨いで壊れる。
@@ -168,11 +245,13 @@ const convertTables: Transform = (lines) => {
  * - 表は行をまたいで集約するので、行数が変わる他の変換より後にまとめて置く。
  */
 const PIPELINE: Transform[] = [
+  convertBlockTex,
+  perLineOutsideProtected(convertInlineTex),
   removeHorizontalRules,
-  perLine(convertLinks),
-  perLine(removeStrong),
-  perLine(removeEmphasis),
-  perLine(convertStrike),
+  perLineOutsideProtected(convertLinks),
+  perLineOutsideProtected(removeStrong),
+  perLineOutsideProtected(removeEmphasis),
+  perLineOutsideProtected(convertStrike),
   perLine(convertHeadings),
   perLine(convertLists),
   perLine(convertQuotes),
