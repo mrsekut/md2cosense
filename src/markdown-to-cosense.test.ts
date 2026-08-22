@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { markdownToCosense } from "./markdown-to-cosense.ts";
+import { markdownToCosense, toFullText } from "./markdown-to-cosense.ts";
 
 /** body だけを取り出すヘルパ (title は別途アサートする) */
 function body(markdown: string, fallbackTitle = "fallback"): string {
@@ -238,21 +238,22 @@ describe("整形", () => {
   });
 });
 
-describe("fullText", () => {
+describe("toFullText", () => {
   it("タイトルと本文を改行で結合する", () => {
     const r = markdownToCosense("# Title\n\nbody", "fallback");
-    expect(r.fullText).toBe("Title\nbody");
+    expect(toFullText(r)).toBe("Title\nbody");
   });
 
   it("本文が空ならタイトルのみを返す", () => {
     const r = markdownToCosense("# Only Title", "fallback");
     expect(r.body).toBe("");
-    expect(r.fullText).toBe("Only Title");
+    expect(toFullText(r)).toBe("Only Title");
   });
 
   it("入力が空文字ならfallbackTitleのみを返す", () => {
     const r = markdownToCosense("", "fallback");
-    expect(r).toEqual({ title: "fallback", body: "", fullText: "fallback" });
+    expect(r).toEqual({ title: "fallback", body: "" });
+    expect(toFullText(r)).toBe("fallback");
   });
 });
 
@@ -297,6 +298,6 @@ describe("複合ケース", () => {
         "> 引用文",
       ].join("\n"),
     );
-    expect(r.fullText).toBe(`${r.title}\n${r.body}`);
+    expect(toFullText(r)).toBe(`${r.title}\n${r.body}`);
   });
 });

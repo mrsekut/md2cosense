@@ -16,7 +16,7 @@
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative } from "node:path";
-import { markdownToCosense } from "./markdown-to-cosense.ts";
+import { markdownToCosense, toFullText } from "./markdown-to-cosense.ts";
 import {
   isLoggedIn,
   normalizeProjectUrl,
@@ -170,15 +170,15 @@ async function main() {
   for (const file of files) {
     const md = await readFile(file, "utf8");
     const fallbackTitle = basename(file, extname(file));
-    const { title, fullText } = markdownToCosense(md, fallbackTitle);
+    const page = markdownToCosense(md, fallbackTitle);
     const rel = relative(process.cwd(), file);
 
     console.log(`\n──────────────────────────────────────────`);
     console.log(`📄 ${rel}`);
-    console.log(`   → page title: "${title}"`);
+    console.log(`   → page title: "${page.title}"`);
 
     try {
-      const preview = await previewNewPage(projectUrl, fullText);
+      const preview = await previewNewPage(projectUrl, toFullText(page));
 
       if (args.dryRun) {
         console.log(`   [dry-run] ${preview.pageUrl}`);

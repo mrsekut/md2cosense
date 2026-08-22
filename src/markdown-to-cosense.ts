@@ -14,9 +14,15 @@ export type ConvertResult = {
   title: string;
   /** タイトルを除いた本文 (Cosense記法) */
   body: string;
-  /** タイトル+本文を結合したフルテキスト (previewEdit --new にそのまま渡せる) */
-  fullText: string;
 };
+
+/**
+ * タイトルと本文を1つのテキストへ結合する (previewEdit --new にそのまま渡せる)。
+ * ConvertResult から一意に決まる派生値なので、フィールドではなく関数として持つ。
+ */
+export function toFullText({ title, body }: ConvertResult): string {
+  return body ? `${title}\n${body}` : title;
+}
 
 /** 行の配列を受け取り行の配列を返す変換。行数が変わってもよい (水平線の削除など) */
 type Transform = (lines: string[]) => string[];
@@ -215,9 +221,8 @@ export function markdownToCosense(
       : applyPipeline(segment.lines),
   );
 
-  const finalTitle = (title ?? fallbackTitle).trim() || fallbackTitle;
-  const body = trimBlankEdges(converted).join("\n");
-  const fullText = body ? `${finalTitle}\n${body}` : finalTitle;
-
-  return { title: finalTitle, body, fullText };
+  return {
+    title: (title ?? fallbackTitle).trim() || fallbackTitle,
+    body: trimBlankEdges(converted).join("\n"),
+  };
 }
