@@ -14,8 +14,9 @@
  *   --help, -h       このヘルプを表示
  */
 
-import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, extname, join, relative } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, extname, relative } from "node:path";
+import { parseArgs } from "node:util";
 import { markdownToCosense, toFullText } from "./markdown-to-cosense.ts";
 import {
   isLoggedIn,
@@ -25,49 +26,51 @@ import {
   submitEdit,
 } from "./cosense.ts";
 
-type Args = {
-  path: string | null;
-  project: string | null;
-  dryRun: boolean;
-  yes: boolean;
-  help: boolean;
-};
+/** コマンドラインの解釈結果。実行に必要な値が揃っているのは run だけ */
+type Command =
+  | { kind: "help" }
+  | { kind: "error"; message: string }
+  | { kind: "run"; path: string; project: string; mode: PublishMode };
 
-function parseArgs(argv: string[]): Args {
-  const args: Args = {
-    path: null,
-    project: null,
-    dryRun: false,
-    yes: false,
-    help: false,
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    switch (a) {
-      case "--project":
-      case "-p":
-        args.project = argv[++i] ?? null;
-        break;
-      case "--dry-run":
-        args.dryRun = true;
-        break;
-      case "--yes":
-      case "-y":
-        args.yes = true;
-        break;
-      case "--help":
-      case "-h":
-        args.help = true;
-        break;
-      default:
-        if (!a.startsWith("-") && args.path === null) {
-          args.path = a;
-        } else if (a.startsWith("--project=")) {
-          args.project = a.slice("--project=".length);
-        }
-    }
+const OPTIONS = {
+  project: { type: "string", short: "p" },
+  "dry-run": { type: "boolean" },
+  yes: { type: "boolean", short: "y" },
+  help: { type: "boolean", short: "h" },
+} as const;
+
+/** parseArgs は未知のオプションで例外を投げるので、メッセージに変換して返す */
+function tryParseArgs(args: string[]) {
+  try {
+    return parseArgs({ args, options: OPTIONS, allowPositionals: true });
+  } catch (err) {
+    return { error: (err as Error).message };
   }
-  return args;
+}
+
+function parseCommand(argv: string[]): Command {
+  const parsed = tryParseArgs(argv);
+  if ("error" in parsed) return { kind: "error", message: parsed.error };
+
+  const { values, positionals } = parsed;
+  if (values.help) return { kind: "help" };
+
+  const [path] = positionals;
+  if (path === undefined) return { kind: "error", message: "<path> is required" };
+  if (values.project === undefined) {
+    return { kind: "error", message: "--project is required" };
+  }
+
+  return {
+    kind: "run",
+    path,
+    project: values.project,
+    mode: values["dry-run"]
+      ? "dry-run"
+      : values.yes
+        ? "yes-to-all"
+        : "interactive",
+  };
 }
 
 const HELP = `md2cosense - A CLI to publish local Markdown to Cosense (Scrapbox)
@@ -89,36 +92,20 @@ Examples:
   md2cosense ./README.md -p https://scrapbox.io/myproject --dry-run
 `;
 
-/** 指定パス配下の .md ファイルを再帰的に収集 */
-async function collectMarkdownFiles(path: string): Promise<string[]> {
-  const s = await stat(path);
-  if (s.isFile()) {
+/** 指定パス配下の .md ファイルを再帰的に収集する。パスが存在しなければ null */
+async function collectMarkdownFiles(path: string): Promise<string[] | null> {
+  const stats = await stat(path).catch(() => null);
+  if (!stats) return null;
+
+  if (stats.isFile()) {
     return extname(path).toLowerCase() === ".md" ? [path] : [];
   }
-  const results: string[] = [];
-  async function walk(dir: string) {
-    const entries = await readdir(dir, { withFileTypes: true });
-    for (const e of entries) {
-      const full = join(dir, e.name);
-      if (e.isDirectory()) {
-        if (e.name === "node_modules" || e.name.startsWith(".")) continue;
-        await walk(full);
-      } else if (e.isFile() && extname(e.name).toLowerCase() === ".md") {
-        results.push(full);
-      }
-    }
-  }
-  await walk(path);
-  return results.sort();
-}
 
-/** stdin から1行読む (確認プロンプト用) */
-async function prompt(question: string): Promise<string> {
-  process.stdout.write(question);
-  for await (const line of console) {
-    return line.trim();
-  }
-  return "";
+  // scan は隠しディレクトリを既に除外するので、node_modules だけ落とせばよい
+  const found = new Bun.Glob("**/*.md").scan({ cwd: path, absolute: true });
+  return (await Array.fromAsync(found))
+    .filter((file) => !relative(path, file).split("/").includes("node_modules"))
+    .sort();
 }
 
 const SEPARATOR = "──────────────────────────────────────────";
@@ -145,9 +132,11 @@ function parseDecision(input: string): Decision {
   }
 }
 
-async function decide(mode: PublishMode): Promise<Decision> {
+/** Bunのグローバル prompt は1行読んで返す (EOFなら null) */
+function decide(mode: PublishMode): Decision {
   if (mode === "yes-to-all") return "yes";
-  return parseDecision(await prompt(`   Publish? [y/N/a(yes to all)/q(quit)] `));
+  const answer = prompt("   Publish? [y/N/a(yes to all)/q(quit)]") ?? "";
+  return parseDecision(answer.trim());
 }
 
 /**
@@ -179,7 +168,7 @@ async function publishOne(
       return { outcome: "succeeded", mode };
     }
 
-    const decision = await decide(mode);
+    const decision = decide(mode);
     if (decision === "quit") {
       console.log("Aborted.");
       return { outcome: "aborted", mode };
@@ -213,55 +202,44 @@ async function publishAll(
   return [outcome, ...(await publishAll(tail, projectUrl, next))];
 }
 
-async function main() {
-  const args = parseArgs(Bun.argv.slice(2));
+/** 認証されていなければ案内を出して false を返す */
+async function ensureLoggedIn(origin: string): Promise<boolean> {
+  if (await isLoggedIn(origin)) return true;
+  console.error(
+    `\nNot authenticated for ${origin}.\n` +
+      `Log in with cosense-cli so the token is saved to ~/.cosense/settings.json:\n` +
+      `  cosense login ${origin}\n` +
+      `(Alternatively, set the COSENSE_PAT environment variable.)\n` +
+      `Then run this command again.`,
+  );
+  return false;
+}
 
-  if (args.help || !args.path) {
-    process.stdout.write(HELP);
-    process.exit(args.help ? 0 : 1);
+async function run(command: Extract<Command, { kind: "run" }>): Promise<number> {
+  const projectUrl = normalizeProjectUrl(command.project);
+
+  const files = await collectMarkdownFiles(command.path);
+  if (files === null) {
+    console.error(`No such path: ${command.path}`);
+    return 1;
   }
-  if (!args.project) {
-    console.error("Error: --project is required\n");
-    process.stdout.write(HELP);
-    process.exit(1);
-  }
-
-  const projectUrl = normalizeProjectUrl(args.project);
-  const origin = originOf(projectUrl);
-
-  // ファイル収集
-  const files = await collectMarkdownFiles(args.path);
   if (files.length === 0) {
-    console.error(`No Markdown files found: ${args.path}`);
-    process.exit(1);
+    console.error(`No Markdown files found: ${command.path}`);
+    return 1;
   }
 
   console.log(`Target: ${projectUrl}`);
   console.log(`Files: ${files.length}`);
-  console.log(args.dryRun ? "(dry-run: nothing will be written)\n" : "");
+  console.log(
+    command.mode === "dry-run" ? "(dry-run: nothing will be written)\n" : "",
+  );
 
-  // ログイン確認 (書き込み時のみ)
-  if (!args.dryRun) {
-    const loggedIn = await isLoggedIn(origin);
-    if (!loggedIn) {
-      console.error(
-        `\nNot authenticated for ${origin}.\n` +
-          `Log in with cosense-cli so the token is saved to ~/.cosense/settings.json:\n` +
-          `  cosense login ${origin}\n` +
-          `(Alternatively, set the COSENSE_PAT environment variable.)\n` +
-          `Then run this command again.`,
-      );
-      process.exit(1);
-    }
+  // 書き込むときだけ、事前に認証を確かめる
+  if (command.mode !== "dry-run") {
+    if (!(await ensureLoggedIn(originOf(projectUrl)))) return 1;
   }
 
-  const mode: PublishMode = args.dryRun
-    ? "dry-run"
-    : args.yes
-      ? "yes-to-all"
-      : "interactive";
-
-  const outcomes = await publishAll(files, projectUrl, mode);
+  const outcomes = await publishAll(files, projectUrl, command.mode);
   const count = (target: Outcome) => outcomes.filter((o) => o === target).length;
 
   console.log(`\n${SEPARATOR}`);
@@ -269,6 +247,23 @@ async function main() {
     `Done: ${count("succeeded")} succeeded / ${count("skipped")} skipped / ` +
       `${count("failed")} failed (of ${files.length})`,
   );
+  return count("failed") > 0 ? 1 : 0;
+}
+
+async function main(): Promise<number> {
+  const command = parseCommand(Bun.argv.slice(2));
+
+  switch (command.kind) {
+    case "help":
+      process.stdout.write(HELP);
+      return 0;
+    case "error":
+      console.error(`Error: ${command.message}\n`);
+      process.stdout.write(HELP);
+      return 1;
+    case "run":
+      return run(command);
+  }
 }
 
 function indent(text: string, prefix: string): string {
@@ -278,7 +273,9 @@ function indent(text: string, prefix: string): string {
     .join("\n");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+process.exit(
+  await main().catch((err) => {
+    console.error(err);
+    return 1;
+  }),
+);
