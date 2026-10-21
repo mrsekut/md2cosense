@@ -5,16 +5,19 @@
  * 同CLI (MIT) の src/lib/request.ts と src/commands/{previewEdit,submitEdit,whoami}.ts
  * のロジックを内包し、fetch で直接APIを叩くように置き換えた。
  *
+ * ファイルのアップロード (uploadImage) も同CLIの src/commands/uploadFile.ts に合わせている。
+ *
  * 認証は Personal Access Token (PAT) を x-personal-access-token ヘッダーに載せる。
  * トークンの解決順は cosense-cli と同じく:
  *   1. 環境変数 COSENSE_PAT (override 用)
  *   2. ~/.cosense/settings.json の users[] (cosense login で保存されたもの)
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, extname, join } from "node:path";
 
 export type PreviewResult = {
   previewId: string;
@@ -286,4 +289,112 @@ export async function isLoggedIn(origin: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 画像のアップロード
+// ---------------------------------------------------------------------------
+
+/** アップロードできる画像の拡張子と、申告する Content-Type */
+const IMAGE_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+};
+
+/** Cosense が画像として埋め込める拡張子か */
+export function isUploadableImage(path: string): boolean {
+  return extname(path).toLowerCase() in IMAGE_TYPES;
+}
+
+/** origin/projectName → projectId。1回の実行で同じ project を何度も引かないため */
+const projectIds = new Map<string, Promise<string>>();
+
+/**
+ * ファイルAPIは project 名ではなく projectId を取る。
+ * /api/projects/<name> は PAT では読めないので、PAT で読める /users から引く。
+ */
+function resolveProjectId(origin: string, projectName: string): Promise<string> {
+  const key = `${origin}/${projectName.toLowerCase()}`;
+  const cached = projectIds.get(key);
+  if (cached) return cached;
+  const resolved = fetchProjectId(origin, projectName);
+  projectIds.set(key, resolved);
+  return resolved;
+}
+
+async function fetchProjectId(
+  origin: string,
+  projectName: string,
+): Promise<string> {
+  const data = (await requestJson(
+    `${origin}/api/projects/${projectName}/users`,
+  )) as { projectId?: unknown };
+  if (typeof data.projectId !== "string" || data.projectId === "") {
+    throw new Error(`projectId not found for ${origin}/${projectName}`);
+  }
+  return data.projectId;
+}
+
+type UploadRequestResponse = {
+  embedUrl?: string;
+  signedUrl?: string;
+  fileId?: string;
+};
+
+/**
+ * 画像を project にアップロードし、本文に埋め込む URL を返す。
+ * 同じ内容のファイルが既にあれば、サーバーはアップロードせずに既存の URL を返す。
+ * そのため何度投稿し直しても同じ画像が増えていくことはない。
+ */
+export async function uploadImage(
+  projectUrl: string,
+  filePath: string,
+): Promise<string> {
+  const contentType = IMAGE_TYPES[extname(filePath).toLowerCase()];
+  if (!contentType) throw new Error(`Unsupported image type: ${filePath}`);
+
+  const { origin, projectName } = parseProject(projectUrl);
+  const projectId = await resolveProjectId(origin, projectName);
+  const body = await readFile(filePath);
+  const md5 = createHash("md5").update(body).digest("hex");
+
+  const request = (await requestJson(
+    `${origin}/api/gcs/${projectId}/upload-request`,
+    {
+      method: "POST",
+      body: { md5, size: body.length, contentType, name: basename(filePath) },
+    },
+  )) as UploadRequestResponse;
+  if (request.embedUrl) return request.embedUrl;
+
+  const { signedUrl, fileId } = request;
+  if (!signedUrl || !fileId) {
+    throw new Error(
+      `Unexpected upload-request response: ${JSON.stringify(request)}`,
+    );
+  }
+
+  // 署名付きURLへの PUT は PAT を付けない。失敗しても認証の案内は出さない
+  const put = await fetch(signedUrl, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body,
+  });
+  if (!put.ok) {
+    const text = await put.text().catch(() => "");
+    throw new Error(
+      `Upload to signed URL failed: HTTP ${put.status} ${put.statusText}\n${text.slice(0, 500)}`,
+    );
+  }
+
+  const verified = (await requestJson(`${origin}/api/gcs/${projectId}/verify`, {
+    method: "POST",
+    body: { md5, fileId },
+  })) as { embedUrl?: string };
+  if (!verified.embedUrl) throw new Error("verify response missing embedUrl");
+  return verified.embedUrl;
 }

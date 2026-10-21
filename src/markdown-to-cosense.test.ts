@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { markdownToCosense, toFullText } from "./markdown-to-cosense.ts";
+import {
+  collectLocalImages,
+  markdownToCosense,
+  toFullText,
+} from "./markdown-to-cosense.ts";
 
 /** body だけを取り出すヘルパ (title は別途アサートする) */
 function body(markdown: string, fallbackTitle = "fallback"): string {
@@ -94,9 +98,21 @@ describe("インライン記法", () => {
     expect(body("[](https://example.com)")).toBe("[https://example.com]");
   });
 
-  it("画像もリンクと同じ形式に変換する", () => {
+  it("画像は alt を捨てて [url] にする ([url alt] だとリンクになり画像として表示されない)", () => {
     expect(body("![alt text](https://example.com/a.png)")).toBe(
-      "[https://example.com/a.png alt text]",
+      "[https://example.com/a.png]",
+    );
+  });
+
+  it("タイトル付きの画像もタイトルを捨てる", () => {
+    expect(body('![alt](https://example.com/a.png "title")')).toBe(
+      "[https://example.com/a.png]",
+    );
+  });
+
+  it("画像とリンクが同じ行にあってもそれぞれ変換する", () => {
+    expect(body("![a](https://example.com/a.svg) と [b](http://b.com)")).toBe(
+      "[https://example.com/a.svg] と [http://b.com b]",
     );
   });
 
@@ -380,6 +396,43 @@ describe("整形", () => {
 
   it("本文中の空行は維持する", () => {
     expect(body("a\n\nb")).toBe("a\n\nb");
+  });
+});
+
+describe("ローカル画像", () => {
+  it("imageUrls にある src をアップロード先URLに差し替える", () => {
+    const imageUrls = new Map([
+      ["figures/ch01-a.svg", "https://scrapbox.io/files/abc.svg"],
+    ]);
+    const r = markdownToCosense("![図](figures/ch01-a.svg)", "fallback", {
+      imageUrls,
+    });
+    expect(r.body).toBe("[https://scrapbox.io/files/abc.svg]");
+  });
+
+  it("imageUrls に無い src はそのまま残す", () => {
+    expect(body("![図](figures/a.svg)")).toBe("[figures/a.svg]");
+  });
+
+  it("collectLocalImages はローカルの src だけを出現順・重複なしで返す", () => {
+    const md = [
+      "![a](figures/a.svg)",
+      "![remote](https://example.com/r.png)",
+      "![b](./b.png) と ![a again](figures/a.svg)",
+      "![data](data:image/png;base64,xxx)",
+    ].join("\n");
+    expect(collectLocalImages(md)).toEqual(["figures/a.svg", "./b.png"]);
+  });
+
+  it("collectLocalImages はコードブロックとインラインコードの中を見ない", () => {
+    const md = [
+      "`![x](in-inline.png)`",
+      "```md",
+      "![y](in-fence.png)",
+      "```",
+      "![z](real.png)",
+    ].join("\n");
+    expect(collectLocalImages(md)).toEqual(["real.png"]);
   });
 });
 

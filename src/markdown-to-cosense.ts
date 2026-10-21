@@ -4,9 +4,9 @@
  * プロトタイプ用の簡易変換。完全なMarkdown仕様は網羅しない。
  * よく使う記法だけをCosenseのUI記法にマッピングする。
  *
- * 設計: 「1つの記法につき1つの変換関数」に分割し、PIPELINE の順に適用する。
+ * 設計: 「1つの記法につき1つの変換関数」に分割し、pipeline の順に適用する。
  * コードブロックの中身はどの変換にも触らせたくないので、先に fence で
- * テキスト領域とコード領域へ切り分け、テキスト領域にだけ PIPELINE を通す。
+ * テキスト領域とコード領域へ切り分け、テキスト領域にだけ pipeline を通す。
  */
 
 export type ConvertResult = {
@@ -54,10 +54,28 @@ function perLineOutsideProtected(convert: (text: string) => string): Transform {
 // インライン記法
 // ---------------------------------------------------------------------------
 
-/** リンク [text](url) と画像 ![alt](url) を [url text] に変換する */
+const IMAGE = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+
+/** http(s) や data: でない、ローカルファイルを指す画像の参照か */
+function isLocalSource(src: string): boolean {
+  return !/^[a-z][a-z0-9+.-]*:/i.test(src);
+}
+
+/**
+ * 画像 ![alt](src) を [url] に変換する。
+ * Cosenseの画像記法は alt を取らない。[url alt] と書くと alt を文字にしたリンクになり、
+ * 画像として表示されない。そのため alt は捨てる。
+ * ローカルの src は imageUrls でアップロード先のURLに差し替える (無ければそのまま)。
+ */
+function convertImages(imageUrls: ReadonlyMap<string, string>) {
+  return (line: string): string =>
+    line.replace(IMAGE, (_m, src: string) => `[${imageUrls.get(src) ?? src}]`);
+}
+
+/** リンク [text](url) を [url text] に変換する */
 function convertLinks(line: string): string {
   return line.replace(
-    /!?\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+    /\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
     (_m, text: string, url: string) => (text ? `[${url} ${text}]` : `[${url}]`),
   );
 }
@@ -242,24 +260,28 @@ const convertTables: Transform = (lines) => {
  *   先に包んでしまうと包んだ記号と本文中の記号がペアと誤認される。
  *   例: `## **bold**` を先に包むと `[** **bold**]` となり、太字除去が `**` を跨いで壊れる。
  * - 見出しはリストより先。`- ` を含む見出しをリスト扱いさせないため。
+ * - 画像はリンクより先。![alt](src) の [alt](src) 部分をリンクとして拾わせないため。
  * - 表は行をまたいで集約するので、行数が変わる他の変換より後にまとめて置く。
  */
-const PIPELINE: Transform[] = [
-  convertBlockTex,
-  perLineOutsideProtected(convertInlineTex),
-  removeHorizontalRules,
-  perLineOutsideProtected(convertLinks),
-  perLineOutsideProtected(removeStrong),
-  perLineOutsideProtected(removeEmphasis),
-  perLineOutsideProtected(convertStrike),
-  perLine(convertHeadings),
-  perLine(convertLists),
-  perLine(convertQuotes),
-  convertTables,
-];
+function pipeline(imageUrls: ReadonlyMap<string, string>): Transform[] {
+  return [
+    convertBlockTex,
+    perLineOutsideProtected(convertInlineTex),
+    removeHorizontalRules,
+    perLineOutsideProtected(convertImages(imageUrls)),
+    perLineOutsideProtected(convertLinks),
+    perLineOutsideProtected(removeStrong),
+    perLineOutsideProtected(removeEmphasis),
+    perLineOutsideProtected(convertStrike),
+    perLine(convertHeadings),
+    perLine(convertLists),
+    perLine(convertQuotes),
+    convertTables,
+  ];
+}
 
-function applyPipeline(lines: string[]): string[] {
-  return PIPELINE.reduce((acc, transform) => transform(acc), lines);
+function applyPipeline(lines: string[], transforms: Transform[]): string[] {
+  return transforms.reduce((acc, transform) => transform(acc), lines);
 }
 
 // ---------------------------------------------------------------------------
@@ -341,17 +363,41 @@ function trimBlankEdges(lines: string[]): string[] {
   return lines.slice(start, lines.findLastIndex((line) => line.trim() !== "") + 1);
 }
 
+function toSegments(markdown: string): Segment[] {
+  return splitByFence(markdown.replace(/\r\n?/g, "\n").split("\n"));
+}
+
+/**
+ * 本文が参照しているローカル画像の src を、出現順・重複なしで返す。
+ * コードブロックとインラインコードの中は対象外 (変換時と同じ範囲だけを見る)。
+ */
+export function collectLocalImages(markdown: string): string[] {
+  const sources = toSegments(markdown)
+    .filter((segment) => segment.kind === "text")
+    .flatMap((segment) => segment.lines)
+    .flatMap((line) => line.split(PROTECTED).filter((_, i) => i % 2 === 0))
+    .flatMap((text) => [...text.matchAll(IMAGE)].map((m) => m[1]!))
+    .filter(isLocalSource);
+  return [...new Set(sources)];
+}
+
+export type ConvertOptions = {
+  /** ローカル画像の src → アップロード先URL。ここに無い src はそのまま残す */
+  imageUrls?: ReadonlyMap<string, string>;
+};
+
 export function markdownToCosense(
   markdown: string,
   fallbackTitle: string,
+  { imageUrls = new Map() }: ConvertOptions = {},
 ): ConvertResult {
-  const segments = splitByFence(markdown.replace(/\r\n?/g, "\n").split("\n"));
-  const { title, rest } = extractTitle(segments);
+  const { title, rest } = extractTitle(toSegments(markdown));
+  const transforms = pipeline(imageUrls);
 
   const converted = rest.flatMap((segment) =>
     segment.kind === "code"
       ? renderCode(segment.lang, segment.lines)
-      : applyPipeline(segment.lines),
+      : applyPipeline(segment.lines, transforms),
   );
 
   return {

@@ -15,15 +15,21 @@
  */
 
 import { readFile, stat } from "node:fs/promises";
-import { basename, extname, relative } from "node:path";
+import { basename, dirname, extname, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { markdownToCosense, toFullText } from "./markdown-to-cosense.ts";
+import {
+  collectLocalImages,
+  markdownToCosense,
+  toFullText,
+} from "./markdown-to-cosense.ts";
 import {
   isLoggedIn,
+  isUploadableImage,
   normalizeProjectUrl,
   originOf,
   previewNewPage,
   submitEdit,
+  uploadImage,
 } from "./cosense.ts";
 
 /** コマンドラインの解釈結果。実行に必要な値が揃っているのは run だけ */
@@ -140,6 +146,38 @@ function decide(mode: PublishMode): Decision {
 }
 
 /**
+ * md が参照しているローカル画像を project にアップロードし、src → URL の対応を返す。
+ * src は md ファイルのあるディレクトリを基準に解決する。
+ * dry-run ではアップロードせず、対象を表示するだけにする (存在と種類は確かめる)。
+ */
+async function uploadLocalImages(
+  md: string,
+  file: string,
+  projectUrl: string,
+  mode: PublishMode,
+): Promise<Map<string, string>> {
+  const entries = await Promise.all(
+    collectLocalImages(md).map(async (src) => {
+      const path = resolve(dirname(file), decodeURI(src));
+      if (!isUploadableImage(path)) {
+        throw new Error(`Unsupported image type: ${src}`);
+      }
+      if (!(await stat(path).catch(() => null))?.isFile()) {
+        throw new Error(`Image not found: ${src}`);
+      }
+      if (mode === "dry-run") {
+        console.log(`   🖼  ${src} (will be uploaded)`);
+        return [src, src] as const;
+      }
+      const url = await uploadImage(projectUrl, path);
+      console.log(`   🖼  ${src} → ${url}`);
+      return [src, url] as const;
+    }),
+  );
+  return new Map(entries);
+}
+
+/**
  * 1ファイルを変換して書き込む。
  * "a" が選ばれるとそれ以降は確認を挟まないので、次に使う mode も一緒に返す。
  */
@@ -149,13 +187,17 @@ async function publishOne(
   mode: PublishMode,
 ): Promise<{ outcome: Outcome; mode: PublishMode }> {
   const md = await readFile(file, "utf8");
-  const page = markdownToCosense(md, basename(file, extname(file)));
+  const fallbackTitle = basename(file, extname(file));
 
   console.log(`\n${SEPARATOR}`);
   console.log(`📄 ${relative(process.cwd(), file)}`);
-  console.log(`   → page title: "${page.title}"`);
+  console.log(`   → page title: "${markdownToCosense(md, fallbackTitle).title}"`);
 
   try {
+    // 確認プロンプトより前にアップロードする。プレビューに最終的なURLを出すため。
+    // 同じ内容は既存のURLが返るので、スキップされたページの画像が残っても実害はない
+    const imageUrls = await uploadLocalImages(md, file, projectUrl, mode);
+    const page = markdownToCosense(md, fallbackTitle, { imageUrls });
     const preview = await previewNewPage(projectUrl, toFullText(page));
 
     if (mode === "dry-run") {
